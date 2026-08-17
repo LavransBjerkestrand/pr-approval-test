@@ -1,0 +1,54 @@
+name: Update revision history
+
+on:
+  pull_request:
+    types: [closed]
+
+# Prevent two merged PRs from modifying the file simultaneously.
+concurrency:
+  group: revision-history
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  update-revision-history:
+    # Only run when the PR was actually merged, not merely closed.
+    if: github.event.pull_request.merged == true
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Update revision history
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          REVISION_HISTORY_FILE: docs/my-document.md
+        run: node .github/scripts/update-revision-history.mjs
+
+      - name: Commit revision history
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$REVISION_HISTORY_FILE"
+          git commit -m "docs: record PR approval for #${{ github.event.pull_request.number }}"
+          git push
