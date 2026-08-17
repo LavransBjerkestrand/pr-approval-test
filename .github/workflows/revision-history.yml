@@ -37,7 +37,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
           REVISION_HISTORY_FILE: docs/my-document.md
-        run: node .github/scripts/update-revision-history.mjs
+        run: node .github/scripts/update-revision-history.mts
 
       - name: Commit revision history
         run: |
