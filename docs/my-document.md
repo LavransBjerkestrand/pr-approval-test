@@ -1,6 +1,6 @@
 # My Document
 
-Some document content... bla bla bla
+Some document content...
 
 ## Revision history
 
