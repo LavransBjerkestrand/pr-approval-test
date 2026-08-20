@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
-import path from "node:path";
 
 const token = process.env.GITHUB_TOKEN;
 const eventPath = process.env.GITHUB_EVENT_PATH;
+const revisionHistoryDirectory = process.env.REVISION_HISTORY_DIRECTORY;
 
 if (!token) {
   throw new Error("GITHUB_TOKEN is not set");
@@ -10,6 +10,10 @@ if (!token) {
 
 if (!eventPath) {
   throw new Error("GITHUB_EVENT_PATH is not set");
+}
+
+if (!revisionHistoryDirectory) {
+  throw new Error("REVISION_HISTORY_DIRECTORY is not set");
 }
 
 const event = JSON.parse(await fs.readFile(eventPath, "utf8"));
@@ -55,6 +59,11 @@ type Review = {
   state: string;
 };
 
+type PullRequestFile = {
+  filename: string;
+  status: string;
+};
+
 /**
  * Fetch all reviews for the PR.
  */
@@ -74,6 +83,36 @@ async function getAllReviews(): Promise<Review[]> {
   }
 
   return reviews;
+}
+
+/**
+ * Fetch the Markdown files changed by the pull request.
+ */
+async function getChangedMarkdownFiles(): Promise<string[]> {
+  const changedFiles: string[] = [];
+  const directory = revisionHistoryDirectory.replace(/\\+$/, "");
+
+  for (let page = 1; ; page++) {
+    const pageFiles = await github<PullRequestFile[]>(
+      `/repos/${owner}/${repo}/pulls/${pullNumber}/files?per_page=100&page=${page}`,
+    );
+
+    for (const file of pageFiles) {
+      if (
+        file.status !== "removed" &&
+        file.filename.startsWith(`${directory}/`) &&
+        file.filename.toLowerCase().endsWith(".md")
+      ) {
+        changedFiles.push(file.filename);
+      }
+    }
+
+    if (pageFiles.length < 100) {
+      break;
+    }
+  }
+
+  return [...new Set(changedFiles)];
 }
 
 const reviews = await getAllReviews();
@@ -116,35 +155,11 @@ const description = String(pullRequest.title)
   .replaceAll("|", "\\|")
   .replaceAll("\n", " ");
 
-/**
- * Recursively find Markdown files under docs/.
- */
-async function findMarkdownFiles(directory: string): Promise<string[]> {
-  const entries = await fs.readdir(directory, {
-    withFileTypes: true,
-  });
+const markdownFiles = await getChangedMarkdownFiles();
 
-  const files: string[] = [];
-
-  for (const entry of entries) {
-    const fullPath = path.join(directory, entry.name);
-
-    if (entry.isDirectory()) {
-      files.push(...(await findMarkdownFiles(fullPath)));
-      continue;
-    }
-
-    if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
-      files.push(fullPath);
-    }
-  }
-
-  return files;
-}
-
-const markdownFiles = await findMarkdownFiles("docs");
-
-console.log(`Found ${markdownFiles.length} Markdown files under docs/.`);
+console.log(
+  `Found ${markdownFiles.length} Markdown files under ${revisionHistoryDirectory}/`,
+);
 
 /**
  * Update one Markdown document.
@@ -156,9 +171,7 @@ async function updateDocument(filePath: string): Promise<boolean> {
   const headingMatch = heading.exec(markdown);
 
   if (!headingMatch) {
-    console.log(`Skipping ${filePath}: no "## Revision history" section.`);
-
-    return false;
+    markdown = `${markdown.trimEnd()}\n\n## Revision history\n\n`;
   }
 
   /**
@@ -170,7 +183,10 @@ async function updateDocument(filePath: string): Promise<boolean> {
     return false;
   }
 
-  const sectionStart = headingMatch.index + headingMatch[0].length;
+  const currentHeadingMatch = heading.exec(markdown);
+  const sectionStart = currentHeadingMatch
+    ? currentHeadingMatch.index + currentHeadingMatch[0].length
+    : markdown.length;
 
   const afterHeading = markdown.slice(sectionStart);
 
@@ -180,14 +196,23 @@ async function updateDocument(filePath: string): Promise<boolean> {
   const tableMatch = afterHeading.match(/^\s*\|[^\n]+\|\s*\n\|[-:| ]+\|\s*\n/);
 
   if (!tableMatch) {
-    console.log(`Skipping ${filePath}: no revision history table.`);
-
-    return false;
+    const table =
+      "| Date | Revision | Description | Approved by |\n" +
+      "| ---- | -------- | ----------- | ----------- |\n";
+    markdown =
+      markdown.slice(0, sectionStart) +
+      `\n\n${table}` +
+      markdown.slice(sectionStart);
   }
 
-  const tableStart = sectionStart + tableMatch.index!;
+  const currentTableMatch =
+    tableMatch ??
+    markdown.slice(sectionStart).match(/\n\n\|[^\n]+\|\n\|[-:| ]+\|\n/);
+  const tableStart = currentTableMatch
+    ? sectionStart + (currentTableMatch.index ?? 0)
+    : sectionStart;
 
-  const tableHeaderEnd = tableStart + tableMatch[0].length;
+  const tableHeaderEnd = tableStart + (currentTableMatch?.[0].length ?? 0);
 
   /**
    * Find the highest MAJOR.MINOR version.
@@ -237,17 +262,8 @@ async function updateDocument(filePath: string): Promise<boolean> {
     }
   }
 
-  /**
-   * A document with no valid version is skipped rather
-   * than silently starting at 0.1.
-   */
-  if (highestMinor === -1) {
-    console.log(`Skipping ${filePath}: no valid MAJOR.MINOR version.`);
-
-    return false;
-  }
-
-  const revision = `${highestMajor}.${highestMinor + 1}`;
+  const revision =
+    highestMinor === -1 ? "0.1" : `${highestMajor}.${highestMinor + 1}`;
 
   const newRow = `| ${date} | ${revision} | ${description} | ${signoff} |\n`;
 
