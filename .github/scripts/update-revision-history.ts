@@ -189,8 +189,16 @@ if (!tableMatch) {
 /**
  * Determine the next revision number.
  *
- * Looks at the Revision column and finds the highest numeric
- * revision already present.
+ * Versions use MAJOR.MINOR.
+ *
+ * Examples:
+ *
+ * 0.1 → 0.2
+ * 0.9 → 0.10
+ * 1.0 → 1.1
+ * 2.7 → 2.8
+ *
+ * Major versions are bumped manually.
  */
 const tableStart = sectionStart + tableMatch.index;
 const tableHeaderEnd = tableStart + tableMatch[0].length;
@@ -199,7 +207,8 @@ const restOfDocument = markdown.slice(tableHeaderEnd);
 
 const rows = restOfDocument.split("\n");
 
-let highestRevision = 0;
+let highestMajor = 0;
+let highestMinor = -1;
 
 for (const row of rows) {
   if (!row.trim().startsWith("|")) {
@@ -215,14 +224,31 @@ for (const row of rows) {
     continue;
   }
 
-  const revision = Number.parseInt(columns[1], 10);
+  const match = columns[1].match(/^(\d+)\.(\d+)$/);
 
-  if (Number.isFinite(revision)) {
-    highestRevision = Math.max(highestRevision, revision);
+  if (!match) {
+    continue;
+  }
+
+  const major = Number.parseInt(match[1], 10);
+  const minor = Number.parseInt(match[2], 10);
+
+  if (
+    major > highestMajor ||
+    (major === highestMajor && minor > highestMinor)
+  ) {
+    highestMajor = major;
+    highestMinor = minor;
   }
 }
 
-const revision = highestRevision + 1;
+if (highestMinor === -1) {
+  throw new Error(
+    "Could not find a valid MAJOR.MINOR version in the revision history.",
+  );
+}
+
+const revision = `${highestMajor}.${highestMinor + 1}`;
 
 /**
  * Insert the newest revision immediately after the table header.
