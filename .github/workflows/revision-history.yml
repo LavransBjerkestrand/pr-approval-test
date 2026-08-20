@@ -39,7 +39,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
-        run: node .github/scripts/update-revision-history.mts
+        run: node .github/scripts/update-revision-history.ts
 
       - name: Commit revision history
         run: |
