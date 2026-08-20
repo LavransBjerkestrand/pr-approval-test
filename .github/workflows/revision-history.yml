@@ -53,4 +53,19 @@ jobs:
 
           git add "$REVISION_HISTORY_FILE"
           git commit -m "docs: record PR approval for #${{ github.event.pull_request.number }}"
-          git push
+
+      # Needed to enforce "Require a pull request before merging" in the repository settings, we need to push using SSH and a Deploy key, as it can be excluded from the branch protection ruleset.
+      - name: Configure SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.REVISION_HISTORY_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Push
+        run: |
+          git remote set-url origin git@github.com:${{ github.repository }}.git
+          git push origin main
