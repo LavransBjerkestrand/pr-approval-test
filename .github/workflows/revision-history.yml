@@ -20,6 +20,9 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    env:
+      REVISION_HISTORY_FILE: docs/my-document.md
+
     steps:
       - name: Check out default branch
         uses: actions/checkout@v4
@@ -36,7 +39,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
-          REVISION_HISTORY_FILE: docs/my-document.md
         run: node .github/scripts/update-revision-history.mts
 
       - name: Commit revision history
