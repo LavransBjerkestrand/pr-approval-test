@@ -4,24 +4,27 @@ on:
   pull_request:
     types: [closed]
 
-# Prevent two merged PRs from modifying the file simultaneously.
 concurrency:
   group: revision-history
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: read
 
 jobs:
   update-revision-history:
-    # Only run when the PR was actually merged, not merely closed.
-    if: github.event.pull_request.merged == true
+    if: >
+      github.event.pull_request.merged == true &&
+      !startsWith(
+        github.event.pull_request.head.ref,
+        'automation/revision-history-'
+      )
 
     runs-on: ubuntu-latest
 
     env:
-      REVISION_HISTORY_FILE: docs/my-document.md
+      REVISION_HISTORY_DIRECTORY: docs
 
     steps:
       - name: Check out default branch
@@ -41,19 +44,6 @@ jobs:
           GITHUB_EVENT_PATH: ${{ github.event_path }}
         run: node .github/scripts/update-revision-history.ts
 
-      - name: Commit revision history
-        run: |
-          if git diff --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add "$REVISION_HISTORY_FILE"
-          git commit -m "docs: record PR approval for #${{ github.event.pull_request.number }}"
-
       # Needed to enforce "Require a pull request before merging" in the repository settings, we need to push using SSH and a Deploy key, as it can be excluded from the branch protection ruleset.
       - name: Configure SSH
         env:
@@ -65,7 +55,21 @@ jobs:
 
           ssh-keyscan github.com >> ~/.ssh/known_hosts
 
-      - name: Push
+      - name: Push revision history
         run: |
-          git remote set-url origin git@github.com:${{ github.repository }}.git
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add docs/
+
+          git commit \
+            -m "docs: record revision history for #${{ github.event.pull_request.number }}"
+
+          git remote set-url origin "git@github.com:${{ github.repository }}.git"
+
           git push origin main

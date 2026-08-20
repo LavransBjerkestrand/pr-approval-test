@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 
 const token = process.env.GITHUB_TOKEN;
 const eventPath = process.env.GITHUB_EVENT_PATH;
-const filePath = process.env.REVISION_HISTORY_FILE;
 
 if (!token) {
   throw new Error("GITHUB_TOKEN is not set");
@@ -10,10 +10,6 @@ if (!token) {
 
 if (!eventPath) {
   throw new Error("GITHUB_EVENT_PATH is not set");
-}
-
-if (!filePath) {
-  throw new Error("REVISION_HISTORY_FILE is not set");
 }
 
 const event = JSON.parse(await fs.readFile(eventPath, "utf8"));
@@ -25,17 +21,17 @@ if (!pullRequest?.merged) {
   process.exit(0);
 }
 
-const owner = event.repository.owner.login;
-const repo = event.repository.name;
-const pullNumber = pullRequest.number;
+const owner: string = event.repository.owner.login;
+const repo: string = event.repository.name;
+const pullNumber: number = pullRequest.number;
 
 console.log(`Processing merged PR #${pullNumber}`);
 
 /**
  * Make an authenticated GitHub API request.
  */
-async function github(path) {
-  const response = await fetch(`https://api.github.com${path}`, {
+async function github<T>(url: string): Promise<T> {
+  const response = await fetch(`https://api.github.com${url}`, {
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
@@ -49,20 +45,24 @@ async function github(path) {
     throw new Error(`GitHub API request failed (${response.status}): ${body}`);
   }
 
-  return response.json();
+  return response.json() as Promise<T>;
 }
+
+type Review = {
+  user?: {
+    login: string;
+  };
+  state: string;
+};
 
 /**
  * Fetch all reviews for the PR.
- *
- * GitHub returns at most 100 per page, so paginate until
- * there are no more results.
  */
-async function getAllReviews() {
-  const reviews = [];
+async function getAllReviews(): Promise<Review[]> {
+  const reviews: Review[] = [];
 
   for (let page = 1; ; page++) {
-    const pageReviews = await github(
+    const pageReviews = await github<Review[]>(
       `/repos/${owner}/${repo}/pulls/${pullNumber}/reviews?per_page=100&page=${page}`,
     );
 
@@ -81,18 +81,9 @@ const reviews = await getAllReviews();
 console.log(`Found ${reviews.length} reviews.`);
 
 /**
- * Keep only the latest review from each user.
- *
- * For example:
- *
- * Alice: APPROVED
- * Bob:   CHANGES_REQUESTED
- * Alice: COMMENTED
- *
- * means Alice is currently COMMENTED, so neither Alice nor Bob
- * is considered an approver.
+ * Keep only the latest review from each reviewer.
  */
-const latestReviewByUser = new Map();
+const latestReviewByUser = new Map<string, Review>();
 
 for (const review of reviews) {
   if (!review.user?.login) {
@@ -104,18 +95,11 @@ for (const review of reviews) {
 
 const approvers = [...latestReviewByUser.values()]
   .filter((review) => review.state === "APPROVED")
-  .map((review) => review.user.login)
+  .map((review) => review.user!.login)
   .sort((a, b) => a.localeCompare(b));
 
 console.log(`Approvers: ${approvers.join(", ") || "(none)"}`);
 
-/**
- * Create the approval text.
- *
- * Example:
- *
- * `alice`, `bob` ([PR #123](https://github.com/acme/project/pull/123))
- */
 const approverText = approvers.length
   ? approvers.map((username) => `\`${username}\``).join(", ")
   : "None";
@@ -124,141 +108,171 @@ const prLink = `[PR #${pullNumber}](${pullRequest.html_url})`;
 
 const signoff = `${approverText} (${prLink})`;
 
-/**
- * Use the merge date rather than the workflow execution date.
- */
 const date = new Date(pullRequest.merged_at ?? new Date().toISOString())
   .toISOString()
   .slice(0, 10);
 
-/**
- * Use the PR title as the revision description.
- *
- * Escape pipes so a PR title cannot break the Markdown table.
- */
-const description = pullRequest.title
+const description = String(pullRequest.title)
   .replaceAll("|", "\\|")
   .replaceAll("\n", " ");
 
 /**
- * Read the document.
+ * Recursively find Markdown files under docs/.
  */
-let markdown = await fs.readFile(filePath, "utf8");
+async function findMarkdownFiles(directory: string): Promise<string[]> {
+  const entries = await fs.readdir(directory, {
+    withFileTypes: true,
+  });
 
-/**
- * Avoid adding the same PR twice.
- *
- * This also makes the script safe to run manually.
- */
-if (markdown.includes(`PR #${pullNumber}](${pullRequest.html_url})`)) {
-  console.log(`PR #${pullNumber} is already present in revision history.`);
+  const files: string[] = [];
 
-  process.exit(0);
-}
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry.name);
 
-/**
- * Find the revision history section.
- */
-const heading = /^## Revision history\s*$/m;
-const headingMatch = heading.exec(markdown);
+    if (entry.isDirectory()) {
+      files.push(...(await findMarkdownFiles(fullPath)));
+      continue;
+    }
 
-if (!headingMatch) {
-  throw new Error(`Could not find "## Revision history" in ${filePath}`);
-}
-
-const sectionStart = headingMatch.index + headingMatch[0].length;
-
-/**
- * Find the first Markdown table after the heading.
- *
- * Expected format:
- *
- * | Date | Revision | Description | Approved by |
- * |------|----------|-------------|-------------|
- */
-const afterHeading = markdown.slice(sectionStart);
-
-const tableMatch = afterHeading.match(/^\s*\|[^\n]+\|\s*\n\|[-:| ]+\|\s*\n/);
-
-if (!tableMatch) {
-  throw new Error(
-    `Could not find a revision history Markdown table after "## Revision history".`,
-  );
-}
-
-/**
- * Determine the next revision number.
- *
- * Versions use MAJOR.MINOR.
- *
- * Examples:
- *
- * 0.1 → 0.2
- * 0.9 → 0.10
- * 1.0 → 1.1
- * 2.7 → 2.8
- *
- * Major versions are bumped manually.
- */
-const tableStart = sectionStart + tableMatch.index;
-const tableHeaderEnd = tableStart + tableMatch[0].length;
-
-const restOfDocument = markdown.slice(tableHeaderEnd);
-
-const rows = restOfDocument.split("\n");
-
-let highestMajor = 0;
-let highestMinor = -1;
-
-for (const row of rows) {
-  if (!row.trim().startsWith("|")) {
-    break;
+    if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+      files.push(fullPath);
+    }
   }
 
-  const columns = row
-    .split("|")
-    .slice(1, -1)
-    .map((column) => column.trim());
-
-  if (columns.length < 2) {
-    continue;
-  }
-
-  const match = columns[1].match(/^(\d+)\.(\d+)$/);
-
-  if (!match) {
-    continue;
-  }
-
-  const major = Number.parseInt(match[1], 10);
-  const minor = Number.parseInt(match[2], 10);
-
-  if (
-    major > highestMajor ||
-    (major === highestMajor && minor > highestMinor)
-  ) {
-    highestMajor = major;
-    highestMinor = minor;
-  }
+  return files;
 }
 
-if (highestMinor === -1) {
-  throw new Error(
-    "Could not find a valid MAJOR.MINOR version in the revision history.",
-  );
-}
+const markdownFiles = await findMarkdownFiles("docs");
 
-const revision = `${highestMajor}.${highestMinor + 1}`;
+console.log(`Found ${markdownFiles.length} Markdown files under docs/.`);
 
 /**
- * Insert the newest revision immediately after the table header.
+ * Update one Markdown document.
  */
-const newRow = `| ${date} | ${revision} | ${description} | ${signoff} |\n`;
+async function updateDocument(filePath: string): Promise<boolean> {
+  let markdown: string = await fs.readFile(filePath, "utf8");
 
-markdown =
-  markdown.slice(0, tableHeaderEnd) + newRow + markdown.slice(tableHeaderEnd);
+  const heading = /^## Revision history\s*$/m;
+  const headingMatch = heading.exec(markdown);
 
-await fs.writeFile(filePath, markdown);
+  if (!headingMatch) {
+    console.log(`Skipping ${filePath}: no "## Revision history" section.`);
 
-console.log(`Added revision ${revision}:`);
-console.log(newRow);
+    return false;
+  }
+
+  /**
+   * Don't add the same PR twice.
+   */
+  if (markdown.includes(`PR #${pullNumber}](${pullRequest.html_url})`)) {
+    console.log(`Skipping ${filePath}: PR #${pullNumber} already recorded.`);
+
+    return false;
+  }
+
+  const sectionStart = headingMatch.index + headingMatch[0].length;
+
+  const afterHeading = markdown.slice(sectionStart);
+
+  /**
+   * Find the Markdown table immediately after the heading.
+   */
+  const tableMatch = afterHeading.match(/^\s*\|[^\n]+\|\s*\n\|[-:| ]+\|\s*\n/);
+
+  if (!tableMatch) {
+    console.log(`Skipping ${filePath}: no revision history table.`);
+
+    return false;
+  }
+
+  const tableStart = sectionStart + tableMatch.index!;
+
+  const tableHeaderEnd = tableStart + tableMatch[0].length;
+
+  /**
+   * Find the highest MAJOR.MINOR version.
+   *
+   * Examples:
+   *
+   * 0.1 → 0.2
+   * 0.9 → 0.10
+   * 1.0 → 1.1
+   */
+  const restOfDocument = markdown.slice(tableHeaderEnd);
+
+  const rows = restOfDocument.split("\n");
+
+  let highestMajor = 0;
+  let highestMinor = -1;
+
+  for (const row of rows) {
+    if (!row.trim().startsWith("|")) {
+      break;
+    }
+
+    const columns = row
+      .split("|")
+      .slice(1, -1)
+      .map((column) => column.trim());
+
+    if (columns.length < 2) {
+      continue;
+    }
+
+    const match = columns[1].match(/^(\d+)\.(\d+)$/);
+
+    if (!match) {
+      continue;
+    }
+
+    const major = Number.parseInt(match[1], 10);
+    const minor = Number.parseInt(match[2], 10);
+
+    if (
+      major > highestMajor ||
+      (major === highestMajor && minor > highestMinor)
+    ) {
+      highestMajor = major;
+      highestMinor = minor;
+    }
+  }
+
+  /**
+   * A document with no valid version is skipped rather
+   * than silently starting at 0.1.
+   */
+  if (highestMinor === -1) {
+    console.log(`Skipping ${filePath}: no valid MAJOR.MINOR version.`);
+
+    return false;
+  }
+
+  const revision = `${highestMajor}.${highestMinor + 1}`;
+
+  const newRow = `| ${date} | ${revision} | ${description} | ${signoff} |\n`;
+
+  /**
+   * Insert newest revision directly below the table header.
+   */
+  markdown =
+    markdown.slice(0, tableHeaderEnd) + newRow + markdown.slice(tableHeaderEnd);
+
+  await fs.writeFile(filePath, markdown);
+
+  console.log(`Updated ${filePath} → revision ${revision}`);
+
+  return true;
+}
+
+/**
+ * Update every document that has a revision history table.
+ */
+let updatedCount = 0;
+
+for (const filePath of markdownFiles) {
+  if (await updateDocument(filePath)) {
+    updatedCount++;
+  }
+}
+
+console.log(`Updated ${updatedCount} document(s).`);
